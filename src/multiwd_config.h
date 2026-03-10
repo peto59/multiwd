@@ -1,0 +1,11 @@
+#ifndef MULTIWD_MAX_TIMERS
+#define MULTIWD_MAX_TIMERS 1024
+#endif
+
+#ifndef MULTIWD_MAX_CHILDREN
+#define MULTIWD_MAX_CHILDREN 128
+#endif
+
+#ifndef MULTIWD_WRAP_FORK
+#define MULTIWD_WRAP_FORK 0
+#endif
