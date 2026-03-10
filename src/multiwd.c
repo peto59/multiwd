@@ -146,16 +146,22 @@ void __attribute__ ((constructor)) debug_print_setup_construct(void) {
 }
 
 static void debug_print(const char *restrict fmt, ...) {
-    puts(fmt);
-    if(!g_tty){
+    if(!g_is_parent){
+        return;
+    }
+    constexpr int max = 1024;
+    char buff[max];
+    /*if(!g_tty){
         debug_print_setup();
     }
-    if (g_tty) {
+    if (g_tty) {*/
         va_list args;
         va_start(args, fmt);
-        vfprintf(g_tty, fmt, args);
+        int n = snprintf(buff, max, fmt ,args);
+        //vfprintf(g_tty, fmt, args);
+        write(2, buff, n);
         va_end(args);
-    }
+    //}
 }
 #endif
 
@@ -222,7 +228,7 @@ __attribute__((destructor)) static void multiwd_destructor(void) {
 #ifdef MULTIWD_DEBUG
     debug_print("Calling shutdown from destructor\n");
 #endif
-    //multiwd_shutdown();
+    multiwd_shutdown();
 }
 
 // ---- fork wrap shenenigans ----
@@ -542,6 +548,9 @@ static int wakeup_thread(atomic_int fd)
 {
     uint64_t val = 1ul;
     if(write(fd, &val, 8) != 8){
+#ifdef MULTIWD_DEBUG
+        debug_print("failed to wake thread!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+#endif
         return -1;
     }
     return 0;
@@ -549,11 +558,17 @@ static int wakeup_thread(atomic_int fd)
 
 static int wakeup_timers_thread(void)
 {
+#ifdef MULTIWD_DEBUG
+        debug_print("waking timers");
+#endif
     return wakeup_thread(g_eventfd_timers);
 }
 
 static int wakeup_children_thread(void)
 {
+#ifdef MULTIWD_DEBUG
+        debug_print("waking children");
+#endif
     return wakeup_thread(g_children_comm_pipe[WRITE_END]);
 }
 
@@ -856,15 +871,15 @@ static void *watchdog_thread_runner(void *arg)
             write_stderr("Watchdog thread failed releasing lock!");
             abort();
         }
+#ifdef MULTIWD_DEBUG
+            debug_print("Watchdog!!! finalizing????? %d\n", g_finalizing);
+#endif
         if(finalize){
 #ifdef MULTIWD_DEBUG
             debug_print("Watchdog finalizing\n");
 #endif
             return NULL;
         }
-#ifdef MULTIWD_DEBUG
-            debug_print("Watchdog!!! finalizing????? %d\n", g_finalizing);
-#endif
 #ifdef MULTIWD_DEBUG
         debug_print("Watchdog work %d\n", epoll_count);
 #endif
@@ -927,10 +942,6 @@ static void *children_thread_runner(void *arg)
 #endif
 
         bool finalize = false;
-#ifdef MULTIWD_DEBUG
-            debug_print("Children!!! finalizing????? %d\n", g_finalizing);
-            printf("Children!!! finalizing????? %d\n", g_finalizing);
-#endif
         if(lock_global() != 0){
             write_stderr("Children thread couldn't acquire lock! Disabling it!");
             return NULL;
@@ -940,6 +951,9 @@ static void *children_thread_runner(void *arg)
             write_stderr("Children thread failed releasing lock!");
             abort();
         }
+#ifdef MULTIWD_DEBUG
+            debug_print("Children!!! finalizing????? %d\n", finalize);
+#endif
         if(finalize){
 #ifdef MULTIWD_DEBUG
             debug_print("Children finalizing\n");
@@ -1055,7 +1069,9 @@ static void child_fork_handler(void)
     g_is_parent = false;
 
     g_watchdog_thread_started = false;
+    g_watchdog_thread = 0;
     g_children_thread_started = false;
+    g_children_thread = 0;
 
 
     if(multiwd_shutdown_locked(false) != 0){
@@ -1370,7 +1386,6 @@ static int multiwd_shutdown_locked(bool total)
         ret |= tmp * -1;
     }
 
-    g_finalizing = false;
     g_initialised = false;
 
     if(unlock_global() != 0) {
@@ -1384,6 +1399,8 @@ static int multiwd_shutdown_locked(bool total)
             abort();
         }
     }
+
+    g_finalizing = tmp == 0;
 
 #ifdef MULTIWD_DEBUG
     debug_print("Closing debug print and exiting with status %d\n", ret * -1);
