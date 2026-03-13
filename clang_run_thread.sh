@@ -1,6 +1,4 @@
 clang \
---std=c23 \
--O1 \
 -g3 \
 -fno-omit-frame-pointer \
 -fno-optimize-sibling-calls \
@@ -39,8 +37,8 @@ clang \
 -fsanitize=vptr \
 -fsanitize=thread \
 -fstack-protector-strong \
--D_FORTIFY_SOURCE=3 \
 -ftrapv \
 -fstack-clash-protection \
 -fsanitize-recover=all \
+-ftrivial-auto-var-init=pattern \
 "$@"

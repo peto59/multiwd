@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include <criterion/criterion.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <stdint.h>

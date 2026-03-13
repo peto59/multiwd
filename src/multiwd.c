@@ -95,12 +95,12 @@ static_qualifier wd_children g_children = { .lock = PTHREAD_MUTEX_INITIALIZER, .
 
 static_qualifier pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static_qualifier volatile int g_eventfd_timers = -1;
-static_qualifier volatile int g_epollfd_timers = -1;
-static_qualifier volatile int g_epollfd_children = -1;
+static_qualifier atomic_int g_eventfd_timers = -1;
+static_qualifier atomic_int g_epollfd_timers = -1;
+static_qualifier atomic_int g_epollfd_children = -1;
 
-static_qualifier volatile int g_children_comm_pipe[2] = { -1, -1 };
-static_qualifier volatile int g_parent_comm_pipe = -1;
+static_qualifier atomic_int g_children_comm_pipe[2] = { -1, -1 };
+static_qualifier atomic_int g_parent_comm_pipe = -1;
 
 static_qualifier volatile bool atfork_installed = false;
 
@@ -108,15 +108,12 @@ static_qualifier atomic_bool g_is_parent = true;
 
 static_qualifier atomic_bool g_initialised = false;
 static_qualifier atomic_bool g_finalizing = false;
-static_qualifier atomic_bool g_finalized = false;
 
 static_qualifier volatile pthread_t g_watchdog_thread;
 static_qualifier atomic_bool g_watchdog_thread_started = false;
-static_qualifier atomic_bool g_watchdog_thread_stop = false;
 
 static_qualifier volatile pthread_t g_children_thread;
 static_qualifier atomic_bool g_children_thread_started = false;
-static_qualifier atomic_bool g_children_thread_stop = false;
 
 static_qualifier volatile uint64_t g_coupling_flags = MULTIWD_COUPLE_BOTH | MULTIWD_AUTOINIT_IN_CHILD | MULTIWD_AUTOREGISTER_CHILDREN;
 static_qualifier volatile typeof(SIGABRT) g_trigger_type = SIGABRT;
@@ -134,6 +131,7 @@ static_qualifier FILE *g_tty = NULL;
 static_qualifier void dump_trace(void);
 static_qualifier void dump_trace(void)
 {
+    return;
     void *buffer[64];
     int nptrs = backtrace(buffer, 64);
     backtrace_symbols_fd(buffer, nptrs, fileno(stderr));
@@ -157,6 +155,7 @@ void __attribute__ ((constructor)) debug_print_setup_construct(void) {
 }
 
 static_qualifier void debug_print(const char *restrict fmt, ...) {
+    return;
     constexpr int max = 1024;
     char buff[max];
     va_list args;
@@ -172,6 +171,7 @@ static_qualifier void debug_print(const char *restrict fmt, ...) {
 
 // ---- declarations ----
 
+static_qualifier inline_qualifier void block_all() inline_macro;
 static_qualifier void write_stderr(const char *str);
 
 static_qualifier void trigger(typeof(SIGABRT) trigger_type);
@@ -188,7 +188,7 @@ static_qualifier inline_qualifier void lock_global_fork_handler(void) inline_mac
 static_qualifier inline_qualifier void unlock_global_fork_handler(void) inline_macro;
 static_qualifier inline_qualifier int reset_mutexes(void) inline_macro;
 
-static_qualifier int wakeup_thread(atomic_int fd, uint64_t *val);
+static_qualifier int wakeup_thread(atomic_int *fd, uint64_t *val);
 static_qualifier int wakeup_timers_thread(void);
 static_qualifier int wakeup_children_thread(void);
 
@@ -223,7 +223,7 @@ static_qualifier int multiwd_kick_locked(uint64_t id, struct timespec *_Nullable
 static_qualifier int multiwd_kick_multiple_locked(uint64_t offset, uint64_t bitmap);
 static_qualifier int multiwd_remove_locked(uint64_t id, struct timespec *_Nullable timeout);
 static_qualifier int multiwd_register_child_locked2(pid_t child_pid, typeof(SIGABRT) trigger_type);
-static_qualifier int multiwd_shutdown_locked(bool in_fork);
+static_qualifier int multiwd_shutdown_internal(bool in_fork);
 
 __attribute__((destructor)) static_qualifier void multiwd_destructor(void);
 __attribute__((destructor(100))) static_qualifier void multiwd_destructor(void) {
@@ -324,12 +324,20 @@ static pid_t multiwd_fork_internal(pid_t (*fork_impl)(void))
 // ---- helper functions ----
 // all of these functions assume locked state or are not concerned with state
 
+static_qualifier inline_qualifier void block_all()
+{
+    //if this function is called the state of libreary is in inconsistent state
+    //this function just blocks everything from working
+    atomic_store(&g_initialised, true);
+    atomic_store(&g_finalizing, false);
+}
+
 static_qualifier void write_stderr(const char *str)
 {
     constexpr size_t buffsize = 512 + 21;
     char buf[buffsize];
 
-    int n = snprintf(buf, buffsize, "\x1b[1;31m[multiwd] %s\x1b[0m\n", str);
+    int n = snprintf(buf, buffsize, "\n\x1b[1;31m[multiwd] %s\x1b[0m\n", str);
     if(n < 0){
         return;
     }
@@ -340,7 +348,7 @@ static_qualifier void write_stderr(const char *str)
         len = buffsize;
     }
 
-    (void) write(2, str, len);
+    (void) write(2, buf, len);
 }
 
 static_qualifier void trigger(typeof(SIGABRT) trigger_type)
@@ -496,32 +504,37 @@ static_qualifier inline_qualifier int lock_global(void)
 
 static_qualifier inline_qualifier int unlock_global(void)
 {
-    int ret = 0;
 #ifdef MULTIWD_DEBUG
         debug_print("Releasing global lock\n");
 #endif
-    if(unlock_timers() != 0){
-        return -1;
-    }
-    if(unlock_children() != 0){
-        return -1;
-    }
     if(pthread_mutex_unlock(&g_lock) != 0){
 #ifdef MULTIWD_DEBUG
         debug_print("Failed releasing global lock\n");
 #endif
         return -1;
     }
-    return ret * -1;
+    if(unlock_timers() != 0){
+        return -1;
+    }
+    if(unlock_children() != 0){
+        return -1;
+    }
+    return 0;
 }
 
 static_qualifier inline_qualifier void lock_global_fork_handler(void)
 {
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
+        return;
+    }
     lock_global();
 }
 
 static_qualifier inline_qualifier void unlock_global_fork_handler(void)
 {
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
+        return;
+    }
     unlock_global();
 }
 
@@ -579,9 +592,9 @@ static_qualifier inline_qualifier int reset_mutexes(void)
     return ret * -1;
 }
 
-static_qualifier int wakeup_thread(atomic_int fd, uint64_t *val)
+static_qualifier int wakeup_thread(atomic_int *fd, uint64_t *val)
 {
-    if(write(fd, val, 8) != 8){
+    if(write(atomic_load(fd), val, 8) != 8){
 #ifdef MULTIWD_DEBUG
         debug_print("failed to wake thread!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
 #endif
@@ -596,7 +609,7 @@ static_qualifier int wakeup_timers_thread(void)
         debug_print("waking timers\n");
 #endif
     uint64_t val = 1ul;
-    return wakeup_thread(g_eventfd_timers, &val);
+    return wakeup_thread(&g_eventfd_timers, &val);
 }
 
 static_qualifier int wakeup_children_thread(void)
@@ -605,7 +618,7 @@ static_qualifier int wakeup_children_thread(void)
         debug_print("waking children\n");
 #endif
     uint64_t val = UINT64_MAX;
-    return wakeup_thread(g_children_comm_pipe[WRITE_END], &val);
+    return wakeup_thread(g_children_comm_pipe + WRITE_END, &val);
 }
 
 static_qualifier inline_qualifier void calculate_bitmap(uint64_t id, off64_t *offset, bitmap_type *bits)
@@ -757,7 +770,7 @@ static_qualifier int remove_child(uint64_t id)
 
     int fd = g_children.children[id].pidfd;
 
-    (void) epoll_ctl(g_epollfd_children, EPOLL_CTL_DEL, fd, NULL);
+    (void) epoll_ctl(atomic_load(&g_epollfd_children), EPOLL_CTL_DEL, fd, NULL);
     if(close(fd) != 0){
         return -1;
     }
@@ -782,9 +795,6 @@ static_qualifier int kill_watcher_threads_locked(void)
     debug_print("kill threads\n");
 #endif
 
-    atomic_store(&g_watchdog_thread_stop, atomic_load(&g_watchdog_thread_started));
-    atomic_store(&g_children_thread_stop, atomic_load(&g_children_thread_started));
-
     if(atomic_load(&g_watchdog_thread_started)){
 #ifdef MULTIWD_DEBUG
     debug_print("try waking timers\n");
@@ -807,41 +817,25 @@ static_qualifier int kill_watcher_threads_locked(void)
         }
     }
 
-    if(timers_woken){
-        bool unlocked = true;
-        if(unlock_timers() != 0){
-            unlocked = false;
-            ret |= 1 << 25;
-        }
-        if(unlocked && pthread_join(g_watchdog_thread, NULL) != 0){
+    if(timers_woken && atomic_load(&g_watchdog_thread_started)){
+        if(pthread_join(g_watchdog_thread, NULL) != 0){
 #ifdef MULTIWD_DEBUG
             debug_print("try join timers\n");
 #endif
             ret |= 1 << 2;
-        } else if (unlocked){
+        } else {
             atomic_store(&g_watchdog_thread_started, false);
-        }
-        if(lock_timers() != 0){
-            ret |= 1 << 26;
         }
     }
 
-    if(children_woken){
-        bool unlocked = true;
-        if(unlock_children() != 0){
-            unlocked = false;
-            ret |= 1 << 27;
-        }
-        if(unlocked && pthread_join(g_children_thread, NULL) != 0){
+    if(children_woken && atomic_load(&g_children_thread_started)){
+        if(pthread_join(g_children_thread, NULL) != 0){
 #ifdef MULTIWD_DEBUG
             debug_print("try join children\n");
 #endif
             ret |= 1 << 3;
-        } else if (unlocked) {
+        } else {
             atomic_store(&g_children_thread_started, false);
-        }
-        if(lock_children() != 0){
-            ret |= 1 << 28;
         }
     }
 
@@ -852,53 +846,52 @@ static_qualifier int close_comm_fds(bool include_parent_comm_pipe, bool include_
 {
     int ret = 0;
 
-    if(include_eventfd && g_eventfd_timers != -1){
-        if(close(g_eventfd_timers) != 0){
+    if(include_eventfd && atomic_load(&g_eventfd_timers) != -1){
+        if(close(atomic_load(&g_eventfd_timers)) != 0){
             ret = 1 << 5;
         } else {
-            g_eventfd_timers = -1;
+            atomic_store(&g_eventfd_timers, -1);
         }
     }
-
     
-    if(g_epollfd_timers != -1){
-        if(close(g_epollfd_timers) != 0){
+    if(atomic_load(&g_epollfd_timers) != -1){
+        if(close(atomic_load(&g_epollfd_timers)) != 0){
             ret = 1 << 6;
         } else {
-            g_epollfd_timers = -1;
+            atomic_store(&g_epollfd_timers, -1);
         }
     }
 
-    if(g_epollfd_children != -1){
-        if(close(g_epollfd_children) != 0){
+    if(atomic_load(&g_epollfd_children) != -1){
+        if(close(atomic_load(&g_epollfd_children)) != 0){
             ret = 1 << 7;
         } else {
-            g_epollfd_children = -1;
+            atomic_store(&g_epollfd_children, -1);
         }
     }
 
 
-    if(g_children_comm_pipe[READ_END] != -1){
-        if(close(g_children_comm_pipe[READ_END]) != 0){
+    if(atomic_load(g_children_comm_pipe + READ_END) != -1){
+        if(close(atomic_load(g_children_comm_pipe + READ_END)) != 0){
             ret = 1 << 8;
         } else {
-            g_children_comm_pipe[READ_END] = -1;
+            atomic_store(g_children_comm_pipe + READ_END, -1);
         }
     }
 
-    if(g_children_comm_pipe[WRITE_END] != -1){
-        if(close(g_children_comm_pipe[WRITE_END]) != 0){
+    if(atomic_load(g_children_comm_pipe + WRITE_END) != -1){
+        if(close(atomic_load(g_children_comm_pipe + WRITE_END)) != 0){
             ret = 1 << 9;
         } else {
-            g_children_comm_pipe[WRITE_END] = -1;
+            atomic_store(g_children_comm_pipe + WRITE_END, -1);
         }
     }
 
-    if(include_parent_comm_pipe && g_parent_comm_pipe != -1){
-        if(close(g_parent_comm_pipe) != 0){
+    if(include_parent_comm_pipe && atomic_load(&g_parent_comm_pipe) != -1){
+        if(close(atomic_load(&g_parent_comm_pipe)) != 0){
             ret = 1 << 10;
         } else {
-            g_parent_comm_pipe = -1;
+            atomic_store(&g_parent_comm_pipe, -1);
         }
     }
     
@@ -941,8 +934,11 @@ static_qualifier void *watchdog_thread_runner(void *arg)
     uint64_t dump;
 
     while(true){
-        if((epoll_count = epoll_wait(g_epollfd_timers, events, event_cnt, -1)) <= 0){
-            write_stderr("Epoll failed in watchdog thread! Disabling it!");
+        if((epoll_count = epoll_wait(atomic_load(&g_epollfd_timers), events, event_cnt, -1)) <= 0){
+#ifdef MULTIWD_DEBUG
+            debug_print("epoll fail errno %d", errno);
+#endif
+            write_stderr("Epoll failed in watchdog thread! Disabling it!\n");
             return NULL;
         }
 
@@ -951,9 +947,9 @@ static_qualifier void *watchdog_thread_runner(void *arg)
 #endif
 
 #ifdef MULTIWD_DEBUG
-            debug_print("Watchdog!!! finalizing????? %d\n", atomic_load(&g_watchdog_thread_stop));
+            debug_print("Watchdog!!! finalizing????? %d\n", atomic_load(&g_finalizing));
 #endif
-        if(atomic_load(&g_watchdog_thread_stop)){
+        if(atomic_load(&g_finalizing)){
 #ifdef MULTIWD_DEBUG
             debug_print("Watchdog finalizing\n");
 #endif
@@ -964,7 +960,7 @@ static_qualifier void *watchdog_thread_runner(void *arg)
 #endif
 
         if(lock_timers() != 0){
-            write_stderr("Watchdog thread couldn't acquire lock! Disabling it!");
+            write_stderr("Watchdog thread couldn't acquire lock! Disabling it!\n");
             return NULL;
         }
         for(int i = 0; i < epoll_count; i++){
@@ -976,10 +972,10 @@ static_qualifier void *watchdog_thread_runner(void *arg)
             }
 
             if(events[i].data.u64 == UINT64_MAX){ //eventfd
-                (void) read(g_eventfd_timers, &dump, sizeof(uint64_t));
 #ifdef MULTIWD_DEBUG
                 debug_print("Watchdog work eventfd\n");
 #endif
+                (void) read(atomic_load(&g_eventfd_timers), &dump, sizeof(uint64_t));
                 while((id = calculate_id(MULTIWD_TIMERS_BITMAP_SLOTS, g_timers.kicked)) != UINT64_MAX){
 #ifdef MULTIWD_DEBUG
                     debug_print("Watchdog work kick id %d\n", id);
@@ -998,16 +994,16 @@ static_qualifier void *watchdog_thread_runner(void *arg)
                     continue;
                 }
 
-                if(!g_is_parent){
+                if(!atomic_load(&g_is_parent)){
                     uint64_t pid = (uint64_t) getpid();
-                    (void) write(g_parent_comm_pipe, &pid, 8);
+                    (void) write(atomic_load(&g_parent_comm_pipe), &pid, 8);
                 }
 
                 trigger_watchdog(id);
             }
         }
         if(unlock_timers() != 0){
-            write_stderr("Watchdog thread failed releasing lock!");
+            write_stderr("Watchdog thread failed releasing lock!\n");
             abort();
 
         }
@@ -1023,8 +1019,11 @@ static_qualifier void *children_thread_runner(void *arg)
     uint64_t id;
 
     while(true){
-        if((epoll_count = epoll_wait(g_epollfd_children, events, event_cnt, -1)) <= 0){
-            write_stderr("Epoll failed in children thread! Disabling it!");
+        if((epoll_count = epoll_wait(atomic_load(&g_epollfd_children), events, event_cnt, -1)) <= 0){
+#ifdef MULTIWD_DEBUG
+            debug_print("epoll fail errno %d", errno);
+#endif
+            write_stderr("Epoll failed in children thread! Disabling it!\n");
             return NULL;
         }
 #ifdef MULTIWD_DEBUG
@@ -1032,9 +1031,9 @@ static_qualifier void *children_thread_runner(void *arg)
 #endif
 
 #ifdef MULTIWD_DEBUG
-            debug_print("Children!!! finalizing????? %d\n", atomic_load(&g_children_thread_stop));
+            debug_print("Children!!! finalizing????? %d\n", atomic_load(&g_finalizing));
 #endif
-        if(atomic_load(&g_children_thread_stop)){
+        if(atomic_load(&g_finalizing)){
 #ifdef MULTIWD_DEBUG
             debug_print("Children finalizing\n");
 #endif
@@ -1043,7 +1042,7 @@ static_qualifier void *children_thread_runner(void *arg)
 
 
         if(lock_children() != 0){
-            write_stderr("Children thread couldn't acquire lock! Disabling it!");
+            write_stderr("Children thread couldn't acquire lock! Disabling it!\n");
             return NULL;
         }
 
@@ -1070,7 +1069,7 @@ static_qualifier void *children_thread_runner(void *arg)
                     write_stderr("Children thread failed releasing lock!");
                     abort();
                 }*/
-                read_cnt = read(g_children_comm_pipe[READ_END], &pid_u, 8);
+                read_cnt = read(atomic_load(g_children_comm_pipe + READ_END), &pid_u, 8);
                 /*if(lock_children() != 0){
                     write_stderr("Children thread couldn't acquire lock! Disabling it!");
                     return NULL;
@@ -1085,7 +1084,7 @@ static_qualifier void *children_thread_runner(void *arg)
                     debug_print("Children finalizing\n");
 #endif
                     if(unlock_children() != 0){
-                        write_stderr("Children thread failed releasing lock!");
+                        write_stderr("Children thread failed releasing lock!\n");
                         abort();
                     }
                     return NULL;
@@ -1142,7 +1141,7 @@ static_qualifier void *children_thread_runner(void *arg)
             }
         }
         if(unlock_children() != 0){
-            write_stderr("Children thread failed releasing lock!");
+            write_stderr("Children thread failed releasing lock!\n");
             abort();
         }
     }
@@ -1154,8 +1153,6 @@ static_qualifier int start_thread(atomic_bool *started, volatile pthread_t *thre
     if(atomic_load(started)){
         return -1;
     }
-
-    atomic_store(started, false);
 
     pthread_t t = *thread;
     if(pthread_create(&t, NULL, fun, NULL) != 0){
@@ -1169,13 +1166,11 @@ static_qualifier int start_thread(atomic_bool *started, volatile pthread_t *thre
 
 static_qualifier int start_watchdog_thread(void)
 {
-    atomic_store(&g_watchdog_thread_stop, false);
     return start_thread(&g_watchdog_thread_started, &g_watchdog_thread, &watchdog_thread_runner);
 }
 
 static_qualifier int start_children_thread(void)
 {
-    atomic_store(&g_children_thread_stop, false);
     return start_thread(&g_children_thread_started, &g_children_thread, &children_thread_runner);
 }
 
@@ -1186,30 +1181,28 @@ static_qualifier int sys_pidfd_open(pid_t pid, unsigned int flags)
 
 static_qualifier void child_fork_handler(void)
 {
-    if(!g_initialised){
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         return;
     }
     atomic_store(&g_is_parent, false);
 
     atomic_store(&g_watchdog_thread_started, false);
-
     g_watchdog_thread = 0;
-    atomic_store(&g_watchdog_thread_stop, false);
+
     atomic_store(&g_children_thread_started, false);
     g_children_thread = 0;
-    atomic_store(&g_children_thread_stop, false);
     
-    if(g_parent_comm_pipe != -1){
+    if(atomic_load(&g_parent_comm_pipe) != -1){
         //failure is ignored
-        close(g_parent_comm_pipe);
+        (void) close(atomic_load(&g_parent_comm_pipe));
     }
-    g_parent_comm_pipe = dup(g_children_comm_pipe[WRITE_END]);
-    if(g_parent_comm_pipe == -1){
+    atomic_store(&g_parent_comm_pipe, dup(atomic_load(g_children_comm_pipe + WRITE_END)));
+    if(atomic_load(&g_parent_comm_pipe) == -1){
         write_stderr("Failed to dup pipe, coupling may not work!\n");
     }
 
 
-    if(multiwd_shutdown_locked(true) != 0){
+    if(multiwd_shutdown_internal(true) != 0){
         write_stderr("Cannot shutdown in child after fork");
         abort();
     }
@@ -1234,11 +1227,6 @@ static_qualifier void child_fork_handler(void)
 
 static_qualifier int multiwd_init_locked(uint64_t flags, typeof(SIGABRT) trigger_type)
 {
-    if(atomic_load(&g_initialised)){
-        errno = EEXIST;
-        return -1;
-    }
-
     if(reset_mutexes() != 0){
         printf("Could not initiaize mutexes");
         return -1;
@@ -1264,10 +1252,6 @@ static_qualifier int multiwd_init_locked(uint64_t flags, typeof(SIGABRT) trigger
     debug_print("INIT\n");
 #endif
 
-    atomic_store(&g_finalizing, false);
-    atomic_store(&g_watchdog_thread_stop, false);
-    atomic_store(&g_children_thread_stop, false);
-
     if(flags != 0){
         g_coupling_flags = flags;
     }
@@ -1275,49 +1259,42 @@ static_qualifier int multiwd_init_locked(uint64_t flags, typeof(SIGABRT) trigger
         g_trigger_type = trigger_type;
     }
 
-    if(g_eventfd_timers == -1){
-        g_eventfd_timers = eventfd(0, EFD_CLOEXEC);
-        if(g_eventfd_timers == -1){
+    if(atomic_load(&g_eventfd_timers) == -1){
+        atomic_store(&g_eventfd_timers, eventfd(0, EFD_CLOEXEC));
+        if(atomic_load(&g_eventfd_timers) == -1){
             return -1;
         }
     }
 
-    if(g_children_comm_pipe[READ_END] == -1 && g_children_comm_pipe[WRITE_END] == -1){
+    if(atomic_load(g_children_comm_pipe + READ_END) == -1 && atomic_load(g_children_comm_pipe + WRITE_END) == -1){
         int temp[2];
         if(pipe(temp) != 0){
             return -1;
         }
-        g_children_comm_pipe[READ_END] = temp[READ_END];
-        g_children_comm_pipe[WRITE_END] = temp[WRITE_END];
-        g_parent_comm_pipe = dup(temp[WRITE_END]);
-        if(g_parent_comm_pipe == -1){
-#ifdef MULTIWD_DEBUG
-            debug_print("failed duping comm pipe\n");
-#endif
-            return -1;
-        }
+        atomic_store(g_children_comm_pipe + READ_END, temp[READ_END]);
+        atomic_store(g_children_comm_pipe + WRITE_END, temp[WRITE_END]);
     }
 
     struct epoll_event event = { .events = EPOLLIN, .data.u64 = UINT64_MAX };
 
-    if(g_epollfd_timers == -1){
-        g_epollfd_timers = epoll_create1(EPOLL_CLOEXEC);
-        if(g_epollfd_timers == -1){
+    if(atomic_load(&g_epollfd_timers) == -1){
+        atomic_store(&g_epollfd_timers, epoll_create1(EPOLL_CLOEXEC));
+        if(atomic_load(&g_epollfd_timers) == -1){
             return -1;
         }
 
-        if(epoll_ctl(g_epollfd_timers, EPOLL_CTL_ADD, g_eventfd_timers, &event) != 0){
+        if(epoll_ctl(atomic_load(&g_epollfd_timers), EPOLL_CTL_ADD, atomic_load(&g_eventfd_timers), &event) != 0){
             return -1;
         }
     }
 
-    if(g_epollfd_children == -1){
-        g_epollfd_children = epoll_create1(EPOLL_CLOEXEC);
-        if(g_epollfd_children == -1){
+    if(atomic_load(&g_epollfd_children) == -1){
+        atomic_store(&g_epollfd_children, epoll_create1(EPOLL_CLOEXEC));
+        if(atomic_load(&g_epollfd_children) == -1){
             return -1;
         }
 
-        if(epoll_ctl(g_epollfd_children, EPOLL_CTL_ADD, g_children_comm_pipe[READ_END], &event) != 0){
+        if(epoll_ctl(atomic_load(&g_epollfd_children), EPOLL_CTL_ADD, atomic_load(g_children_comm_pipe + READ_END), &event) != 0){
             return -1;
         }
     }
@@ -1338,7 +1315,6 @@ static_qualifier int multiwd_init_locked(uint64_t flags, typeof(SIGABRT) trigger
     }
 
     atomic_store(&g_initialised, true);
-    atomic_store(&g_finalized, false);
     (void)atexit(&multiwd_destructor);
 #ifdef MULTIWD_DEBUG
     debug_print("inited\n");
@@ -1383,7 +1359,7 @@ static_qualifier int multiwd_add3_locked(uint64_t id, const struct timespec *tim
 
     struct epoll_event event = { .events = EPOLLIN, .data.u64 = id };
 
-    if(epoll_ctl(g_epollfd_timers, EPOLL_CTL_ADD, fd, &event) != 0){
+    if(epoll_ctl(atomic_load(&g_epollfd_timers), EPOLL_CTL_ADD, fd, &event) != 0){
 #ifdef MULTIWD_DEBUG
         debug_print("add3 locked epoll add failed, errno %d!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", errno);
 #endif
@@ -1457,10 +1433,10 @@ static_qualifier int multiwd_remove_locked(uint64_t id, struct timespec *_Nullab
     }
 
     int fd = g_timers.timers[id].timer_fd;
-    int epoll_ret = epoll_ctl(g_epollfd_timers, EPOLL_CTL_DEL, fd, NULL);
+    int epoll_ret = epoll_ctl(atomic_load(&g_epollfd_timers), EPOLL_CTL_DEL, fd, NULL);
 #ifdef MULTIWD_DEBUG
     if(epoll_ret != 0){
-        debug_print("remove locked, epoll failed, errno %d", errno);
+        debug_print("remove locked, epoll failed, errno %d\n", errno);
     }
 #endif
 
@@ -1509,7 +1485,7 @@ static_qualifier int multiwd_register_child_locked2(pid_t child_pid, typeof(SIGA
 
     struct epoll_event event = { .events = EPOLLIN, .data.u64 = id };
 
-    if(epoll_ctl(g_epollfd_children, EPOLL_CTL_ADD, fd, &event) != 0){
+    if(epoll_ctl(atomic_load(&g_epollfd_children), EPOLL_CTL_ADD, fd, &event) != 0){
         g_children.used[offset] &= ~bits;
         return -3;
     }
@@ -1517,9 +1493,9 @@ static_qualifier int multiwd_register_child_locked2(pid_t child_pid, typeof(SIGA
     return 0;
 }
 
-static_qualifier int multiwd_shutdown_locked(bool in_fork)
+static_qualifier int multiwd_shutdown_internal(bool in_fork)
 {
-    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing) || atomic_load(&g_finalized)){
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         errno = ENOTSUP;
         return -1;
     }
@@ -1536,6 +1512,18 @@ static_qualifier int multiwd_shutdown_locked(bool in_fork)
         ret |= tmp * -1;
     }
 
+    if(!in_fork){
+#ifdef MULTIWD_DEBUG
+        debug_print("Acquiring global lock for shutdown\n");
+#endif
+        if(lock_global() != 0){
+#ifdef MULTIWD_DEBUG
+            debug_print("Failed acquiring global lock for shutdown\n");
+#endif
+            return -205;
+        }
+    }
+
     if((tmp = cleanup_timers()) != 0){
 #ifdef MULTIWD_DEBUG
         debug_print("Shutdown cleanup_timers failed ret: %d\n", tmp * -1);
@@ -1550,17 +1538,18 @@ static_qualifier int multiwd_shutdown_locked(bool in_fork)
         ret |= tmp * -1;
     }
 
-    if((tmp = close_comm_fds(g_is_parent || !in_fork, ret == 0)) != 0){
+    if((tmp = close_comm_fds(atomic_load(&g_is_parent) || !in_fork, ret == 0)) != 0){
 #ifdef MULTIWD_DEBUG
         debug_print("Shutdown close_comm_fds failed ret: %d\n", tmp * -1);
 #endif
         ret |= tmp * -1;
     }
 
-    atomic_store(&g_initialised, false);
-    atomic_store(&g_finalizing, false);
 
     if(unlock_global() != 0) {
+#ifdef MULTIWD_DEBUG
+        debug_print("Shutdown, could not release lock before mutex destroy!");
+#endif
         ret |= 1 << 20;
     }
 
@@ -1571,7 +1560,8 @@ static_qualifier int multiwd_shutdown_locked(bool in_fork)
         }
     }
 
-    atomic_store(&g_finalized, true);
+    atomic_store(&g_initialised, false);
+    atomic_store(&g_finalizing, false);
 
 #ifdef MULTIWD_DEBUG
     debug_print("Closing debug print and exiting with status %d\n", ret * -1);
@@ -1589,11 +1579,16 @@ static_qualifier int multiwd_shutdown_locked(bool in_fork)
 
 int multiwd_init(uint64_t flags, typeof(SIGABRT) trigger_type)
 {
+    if(atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
+        errno = EEXIST;
+        return -1;
+    }
+
     //no lock as init creates mutexes
     int ret = multiwd_init_locked(flags, trigger_type);
     if(unlock_global() != 0){
         write_stderr("Init couldn't release lock!");
-        multiwd_shutdown_locked(false);
+        block_all();
         return -205;
     }
 #ifdef MULTIWD_DEBUG
@@ -1609,7 +1604,7 @@ int multiwd_add(uint64_t id, const struct timespec *timeout)
 
 int multiwd_add3(uint64_t id, const struct timespec *timeout, int trigger_type)
 {
-    if(!atomic_load(&g_initialised)){
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         errno = ENOTSUP;
         return -1;
     }
@@ -1633,7 +1628,7 @@ int multiwd_add3(uint64_t id, const struct timespec *timeout, int trigger_type)
     int ret = multiwd_add3_locked(id, timeout, trigger_type);
     if(unlock_timers() != 0){
         write_stderr("Add couldn't release lock! Shutting down!");
-        multiwd_shutdown_locked(false);
+        block_all();
         return -205;
     }
 #ifdef MULTIWD_DEBUG
@@ -1644,7 +1639,7 @@ int multiwd_add3(uint64_t id, const struct timespec *timeout, int trigger_type)
 
 int multiwd_kick(uint64_t id, struct timespec *_Nullable remaining)
 {
-    if(!atomic_load(&g_initialised)){
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         errno = ENOTSUP;
         return -1;
     }
@@ -1668,7 +1663,7 @@ int multiwd_kick(uint64_t id, struct timespec *_Nullable remaining)
 #endif
     if(unlock_timers() != 0){
         write_stderr("Kick couldn't release lock! Shutting down!");
-        multiwd_shutdown_locked(false);
+        block_all();
         return -205;
     }
     return ret;
@@ -1676,7 +1671,7 @@ int multiwd_kick(uint64_t id, struct timespec *_Nullable remaining)
 
 int multiwd_kick_minimal(uint64_t id)
 {
-    if(!atomic_load(&g_initialised)){
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         errno = ENOTSUP;
         return -1;
     }
@@ -1706,7 +1701,7 @@ int multiwd_kick_minimal(uint64_t id)
 
 int multiwd_kick_multiple(uint64_t offset, uint64_t bitmap)
 {
-    if(!atomic_load(&g_initialised)){
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         errno = ENOTSUP;
         return -1;
     }
@@ -1732,7 +1727,7 @@ int multiwd_kick_multiple(uint64_t offset, uint64_t bitmap)
     int ret = multiwd_kick_multiple_locked(offset, bitmap);
     if(unlock_timers() != 0){
         write_stderr("kick_multiple couldn't release lock! Shutting down!");
-        multiwd_shutdown_locked(false);
+        block_all();
         return -205;
     }
 #ifdef MULTIWD_DEBUG
@@ -1743,7 +1738,7 @@ int multiwd_kick_multiple(uint64_t offset, uint64_t bitmap)
 
 int multiwd_kick_multiple_minimal(uint64_t offset, uint64_t bitmap)
 {
-    if(!atomic_load(&g_initialised)){
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         errno = ENOTSUP;
         return -1;
     }
@@ -1772,7 +1767,7 @@ int multiwd_kick_multiple_minimal(uint64_t offset, uint64_t bitmap)
 
 int multiwd_remove(uint64_t id, struct timespec *_Nullable timeout)
 {
-    if(!atomic_load(&g_initialised)){
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         errno = ENOTSUP;
         return -1;
     }
@@ -1793,7 +1788,7 @@ int multiwd_remove(uint64_t id, struct timespec *_Nullable timeout)
     int ret = multiwd_remove_locked(id, timeout);
     if(unlock_timers() != 0){
         write_stderr("Remove couldn't release lock! Shutting down!");
-        multiwd_shutdown_locked(false);
+        block_all();
         return -205;
     }
 #ifdef MULTIWD_DEBUG
@@ -1809,7 +1804,7 @@ int multiwd_register_child(pid_t child_pid)
 
 int multiwd_register_child2(pid_t child_pid, typeof(SIGABRT) trigger_type)
 {
-    if(!atomic_load(&g_initialised)){
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         errno = ENOTSUP;
         return -1;
     }
@@ -1825,7 +1820,7 @@ int multiwd_register_child2(pid_t child_pid, typeof(SIGABRT) trigger_type)
     int ret = multiwd_register_child_locked2(child_pid, trigger_type);
     if(unlock_children() != 0){
         write_stderr("Register_child2 couldn't release lock! Shutting down!");
-        multiwd_shutdown_locked(false);
+        block_all();
         return -205;
 
     }
@@ -1837,19 +1832,10 @@ int multiwd_register_child2(pid_t child_pid, typeof(SIGABRT) trigger_type)
 
 int multiwd_shutdown(void)
 {
-    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing) || atomic_load(&g_finalized)){
+    if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         errno = ENOTSUP;
         return -1;
     }
-#ifdef MULTIWD_DEBUG
-    debug_print("Acquiring global lock for shutdown\n");
-#endif
-    if(lock_global() != 0){
-#ifdef MULTIWD_DEBUG
-    debug_print("Failed acquiring global lock for shutdown\n");
-#endif
-        return -205;
-    }
-    return multiwd_shutdown_locked(false);
+    return multiwd_shutdown_internal(false);
     //no unlock as shutdown destroys mutexes
 }

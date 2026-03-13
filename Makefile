@@ -11,11 +11,11 @@ TEST_O := $(BUILD_DIR)/tests.o
 
 TTY := $(shell tty)
 
-CFLAGS := -O1 -fPIC 
-CFLAGS_TEST := $(CLAGS) -DTARGET_TTY=\"$(TTY)\" -DMULTIWD_DEBUG=\"1\" -fprofile-instr-generate -fcoverage-mapping
+CFLAGS := --std=c23 -O2 -fPIC -D_FORTIFY_SOURCE=3  
+CFLAGS_TEST := $(CFLAGS) -DTARGET_TTY=\"$(TTY)\" -g3 -fno-inline -fno-omit-frame-pointer -fprofile-instr-generate -fcoverage-mapping
 
-LDFLAGS := -O1 -rdynamic
-LDFLAGS_TEST := $(LDFLAGS) -fprofile-instr-generate -fcoverage-mapping
+LDFLAGS := -O2 -rdynamic -D_FORTIFY_SOURCE=3 
+LDFLAGS_TEST := $(LDFLAGS) -g3 -fno-inline -fno-omit-frame-pointer -fprofile-instr-generate -fcoverage-mapping
 
 ifeq ($(TYPE),thread)
 LDFLAGS_TEST += -fsanitize=thread
@@ -59,8 +59,8 @@ test: $(TEST_BIN)_$(TYPE)
 	@if [[ "$(TYPE)" == "thread" ]]; then \
 		bash -c 'ulimit -n 65536; \
 			export LLVM_PROFILE_FILE="build/%p.profraw"; \
-			export TSAN_OPTIONS="die_after_fork=0"; \
-			while ! ./$(TEST_BIN) -j1 --always-succeed --verbose; do\
+			export TSAN_OPTIONS="die_after_fork=0:second_deadlock_stack=1:stack_trace_limit=256"; \
+			while ! ./$(TEST_BIN); do\
 				sleep 10; \
 				printf "\033[H\033[3J"; \
 			done';\
@@ -81,7 +81,7 @@ $(TEST_BIN)_thread: FORCE $(BUILD_DIR)/$(LIB_NAME)_sanitizers.so
 	@echo "building tests"
 	@echo "Creating tty" > $(TTY)
 	clang --std=c23 -fPIC -c $(TEST_DIR)/tests_thread.c -o $(TEST_O)
-	clang -Lbuild $(TEST_O) $(LDFLAGS_TEST) -lmultiwd_sanitizers -lcriterion -o $(TEST_BIN)
+	clang -Lbuild $(TEST_O) $(LDFLAGS_TEST) -lmultiwd_sanitizers -o $(TEST_BIN)
 
 coverage: test
 	llvm-profdata merge -sparse -failure-mode=all build/*.profraw -o build/coverage.profdata
