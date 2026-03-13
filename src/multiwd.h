@@ -52,6 +52,7 @@ int multiwd_add(uint64_t id, const struct timespec *timeout);
 
 /*
  * Expands add by specifying signal to be sent when watchdog triggers.
+ * The trigger_type must be raisable signal or SIGABRT
  * Use 0 global behaviour.
  */
 int multiwd_add3(uint64_t id, const struct timespec *timeout, typeof(SIGABRT) trigger_type);
@@ -98,6 +99,7 @@ int multiwd_register_child(pid_t child_pid);
 
 /*
  *  Expands multiwd_register_child functionality by specifying signal to be sent
+ * The trigger_type must be raisable signal or SIGABRT
  */
 int multiwd_register_child2(pid_t child_pid, typeof(SIGABRT) trigger_type);
 

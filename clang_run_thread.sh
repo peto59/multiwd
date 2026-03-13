@@ -25,9 +25,6 @@ clang \
 -Wunreachable-code \
 -Wvla \
 -Walloca \
--Wduplicated-cond \
--Wduplicated-branches \
--Wlogical-op \
 -Wthread-safety \
 -Watomic-access \
 -fsanitize=integer \

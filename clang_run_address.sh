@@ -1,6 +1,6 @@
 clang \
 --std=c23 \
--O0 \
+-O1 \
 -g3 \
 -fno-omit-frame-pointer \
 -fno-optimize-sibling-calls \
@@ -25,9 +25,6 @@ clang \
 -Wunreachable-code \
 -Wvla \
 -Walloca \
--Wduplicated-cond \
--Wduplicated-branches \
--Wlogical-op \
 -Wthread-safety \
 -Watomic-access \
 -fsanitize=address,undefined,leak \
