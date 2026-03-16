@@ -155,7 +155,6 @@ void __attribute__ ((constructor)) debug_print_setup_construct(void) {
 }
 
 static_qualifier void debug_print(const char *restrict fmt, ...) {
-    return;
     constexpr int max = 1024;
     char buff[max];
     va_list args;
@@ -1604,6 +1603,10 @@ int multiwd_add(uint64_t id, const struct timespec *timeout)
 
 int multiwd_add3(uint64_t id, const struct timespec *timeout, int trigger_type)
 {
+#ifdef MULTIWD_DEBUG
+    debug_print("!initialised? %d, finalizing? %d", !atomic_load(&g_initialised), atomic_load(&g_finalizing));
+    debug_print("compound: %d", !atomic_load(&g_initialised) || atomic_load(&g_finalizing));
+#endif
     if(!atomic_load(&g_initialised) || atomic_load(&g_finalizing)){
         errno = ENOTSUP;
         return -1;

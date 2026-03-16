@@ -1,21 +1,27 @@
-TYPE ?= thread
+TYPE ?= address
 
-SRC_DIR := src
-TEST_DIR := tests
-BUILD_DIR := build
+SRC_DIR = src
+INCLUDE_DIR = include
+TEST_DIR = tests
+BUILD_DIR = build
 
-LIB_NAME := libmultiwd
+LIB_SRC = $(SRC_DIR)/multiwd.c
+LIB_O = $(BUILD_DIR)/multiwd.o
+LIB_NAME = $(BUILD_DIR)/libmultiwd.so
+LIB_NAME_SANITIZERS = $(BUILD_DIR)/libmultiwd_sanitizers.so
 
-TEST_BIN := $(BUILD_DIR)/tests
-TEST_O := $(BUILD_DIR)/tests.o
+TEST_SRC = $(TEST_DIR)/tests_$(TYPE).c
+TEST_O = $(BUILD_DIR)/tests.o
+TEST_BIN = $(BUILD_DIR)/tests
 
-TTY := $(shell tty)
+TTY = $(shell tty)
 
-CFLAGS := --std=c23 -O2 -fPIC -D_FORTIFY_SOURCE=3  
-CFLAGS_TEST := $(CFLAGS) -DTARGET_TTY=\"$(TTY)\" -g3 -fno-inline -fno-omit-frame-pointer -fprofile-instr-generate -fcoverage-mapping
+CC = clang
+CFLAGS = --std=c23 -O2 -fPIC -D_FORTIFY_SOURCE=3 -I$(INCLUDE_DIR) 
+CFLAGS_TEST = $(CFLAGS) -DMULTIWD_DEBUG=\"1\" -DTARGET_TTY=\"$(TTY)\" -g3 -fno-inline -fno-omit-frame-pointer -fprofile-instr-generate -fcoverage-mapping
 
-LDFLAGS := -O2 -rdynamic -D_FORTIFY_SOURCE=3 
-LDFLAGS_TEST := $(LDFLAGS) -g3 -fno-inline -fno-omit-frame-pointer -fprofile-instr-generate -fcoverage-mapping
+LDFLAGS = -O2 -rdynamic -D_FORTIFY_SOURCE=3 
+LDFLAGS_TEST = $(LDFLAGS) -g3 -fno-inline -fno-omit-frame-pointer -fprofile-instr-generate -fcoverage-mapping
 
 ifeq ($(TYPE),thread)
 LDFLAGS_TEST += -fsanitize=thread
@@ -37,24 +43,26 @@ LDFLAGS_TEST += -fsanitize=address,undefined,leak \
 -fstack-protector-strong
 endif
 
-# Default target: build library
-all: $(BUILD_DIR) $(BUILD_DIR)/$(LIB_NAME).so
 
-# Build directory
-$(BUILD_DIR):
+.PHONY: $(BUILD_DIR) test FORCE all clean coverage
+all: $(BUILD_DIR) $(LIB_NAME)
+FORCE:
+
+$(BUILD_DIR): FORCE
 	mkdir -p $(BUILD_DIR)
 
-# Compile library objects
-$(BUILD_DIR)/$(LIB_NAME).so: $(BUILD_DIR) $(SRC_DIR)/multiwd.c
-	clang $(CFLAGS) -c $(SRC_DIR)/multiwd.c -o $(BUILD_DIR)/$(LIB_NAME).so
+$(LIB_O): $(LIB_SRC)
+	$(CC) $(CFLAGS) -c $^ -o $@
 
-$(BUILD_DIR)/$(LIB_NAME)_sanitizers.so: $(BUILD_DIR) $(SRC_DIR)/multiwd.c
-	./clang_run_$(TYPE).sh $(CFLAGS_TEST) -c $(SRC_DIR)/multiwd.c -o $(BUILD_DIR)/$(LIB_NAME)_sanitizers.so
+$(LIB_NAME): $(LIB_O)
+	clang $(CFLAGS) --shared $^ -o $@
+
+$(LIB_NAME_SANITIZERS): $(LIB_SRC)
+	./clang_run_$(TYPE).sh $(CFLAGS_TEST) -c $^ -o $@
 
 
-.PHONY: test FORCE
 
-test: $(TEST_BIN)_$(TYPE)
+test: $(BUILD_DIR) $(TEST_BIN)
 	@echo "Running tests..."
 	@if [[ "$(TYPE)" == "thread" ]]; then \
 		bash -c 'ulimit -n 65536; \
@@ -71,17 +79,11 @@ test: $(TEST_BIN)_$(TYPE)
 		./$(TEST_BIN) -j1 --verbose; \
 	fi
 
-$(TEST_BIN)_address: FORCE $(BUILD_DIR)/$(LIB_NAME)_sanitizers.so
+$(TEST_BIN): FORCE $(LIB_NAME_SANITIZERS)
 	@echo "building tests"
 	@echo "Creating tty" > $(TTY)
-	clang --std=c23 -fPIC -c $(TEST_DIR)/tests.c -o $(TEST_O)
-	clang -Lbuild $(TEST_O) $(LDFLAGS_TEST) -lmultiwd_sanitizers -lcriterion -o $(TEST_BIN)
-
-$(TEST_BIN)_thread: FORCE $(BUILD_DIR)/$(LIB_NAME)_sanitizers.so
-	@echo "building tests"
-	@echo "Creating tty" > $(TTY)
-	clang --std=c23 -fPIC -c $(TEST_DIR)/tests_thread.c -o $(TEST_O)
-	clang -Lbuild $(TEST_O) $(LDFLAGS_TEST) -lmultiwd_sanitizers -o $(TEST_BIN)
+	clang $(CFLAGS) -c $(TEST_SRC) -o $(TEST_O)
+	clang -L$(BUILD_DIR) $(TEST_O) $(LDFLAGS_TEST) -lmultiwd_sanitizers -Wl,-rpath,'./build' -lcriterion -o $(TEST_BIN)
 
 coverage: test
 	llvm-profdata merge -sparse -failure-mode=all build/*.profraw -o build/coverage.profdata
@@ -95,4 +97,3 @@ coverage: test
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: all test clean coverage

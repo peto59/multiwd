@@ -16,8 +16,8 @@
 #include <linux/prctl.h>
 #include <sys/prctl.h>
 
-#include "../src/multiwd_config.h"
-#include "../src/multiwd.h"
+#include "multiwd_config.h"
+#include "multiwd.h"
 
 static const char *current_test_name = NULL;
 

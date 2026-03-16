@@ -14,8 +14,8 @@
 #include <linux/prctl.h>  /* Definition of PR_* constants */
 #include <sys/prctl.h>
 
-#include "../src/multiwd_config.h"
-#include "../src/multiwd.h"
+#include "multiwd_config.h"
+#include "multiwd.h"
 
 void init_fun(void)
 {
@@ -237,31 +237,31 @@ Test(multiwd, uninitialised, .fini = fini_fun, .disabled = false)
     int r;
     const struct timespec t = { .tv_sec = 30, .tv_nsec = 3 };
 
-    multiwd_add(0, &t);
-    cr_assert_neq(r, 0, "ret=%d", r);
-    multiwd_add3(0, &t, SIGTERM);
-    cr_assert_neq(r, 0, "ret=%d", r);
-    multiwd_kick(0, NULL);
-    cr_assert_neq(r, 0, "ret=%d", r);
-    multiwd_kick_minimal(0);
-    cr_assert_neq(r, 0, "ret=%d", r);
-    multiwd_kick_multiple(0, 0);
-    cr_assert_neq(r, 0, "ret=%d", r);
-    multiwd_kick_multiple_minimal(0, 0);
-    cr_assert_neq(r, 0, "ret=%d", r);
-    multiwd_remove(0, NULL);
-    cr_assert_neq(r, 0, "ret=%d", r);
-    multiwd_register_child(getppid());
-    cr_assert_neq(r, 0, "ret=%d", r);
-    multiwd_register_child2(getppid(), SIGTERM);
-    cr_assert_neq(r, 0, "ret=%d", r);
+    r = multiwd_add(0, &t);
+    cr_expect_neq(r, 0, "ret=%d", r);
+    r = multiwd_add3(0, &t, SIGTERM);
+    cr_expect_neq(r, 0, "ret=%d", r);
+    r = multiwd_kick(0, NULL);
+    cr_expect_neq(r, 0, "ret=%d", r);
+    r = multiwd_kick_minimal(0);
+    cr_expect_neq(r, 0, "ret=%d", r);
+    r = multiwd_kick_multiple(0, 0);
+    cr_expect_neq(r, 0, "ret=%d", r);
+    r = multiwd_kick_multiple_minimal(0, 0);
+    cr_expect_neq(r, 0, "ret=%d", r);
+    r = multiwd_remove(0, NULL);
+    cr_expect_neq(r, 0, "ret=%d", r);
+    r = multiwd_register_child(getppid());
+    cr_expect_neq(r, 0, "ret=%d", r);
+    r = multiwd_register_child2(getppid(), SIGTERM);
+    cr_expect_neq(r, 0, "ret=%d", r);
     pid_t pid = multiwd_fork();
-    cr_assert_geq(pid, 0);
+    cr_expect_geq(pid, 0);
     if(pid == 0){
         exit(0);
     }
     waitpid(pid, NULL, 0);
-    multiwd_shutdown();
+    r = multiwd_shutdown();
     cr_assert_neq(r, 0, "ret=%d", r);
 }
 
